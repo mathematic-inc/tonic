@@ -1,7 +1,7 @@
 //! Batteries included server and client.
 //!
 //! This module provides a set of batteries included, fully featured and
-//! fast set of HTTP/2 server and client's. These components each provide a or
+//! fast set of HTTP/2 server and client's. These components each provide a
 //! `rustls` tls backend when the respective feature flag is enabled, and
 //! provides builders to configure transport behavior.
 //!
@@ -107,8 +107,9 @@ pub use self::service::grpc_timeout::TimeoutExpired;
 #[cfg(feature = "tls")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tls")))]
 pub use self::tls::Certificate;
-pub use axum::{body::BoxBody as AxumBoxBody, Router as AxumRouter};
-pub use hyper::{Body, Uri};
+pub use axum::{body::Body as AxumBoxBody, Router as AxumRouter};
+pub use hyper::body::Body;
+pub use hyper::Uri;
 
 pub(crate) use self::service::executor::Executor;
 
@@ -121,5 +122,8 @@ pub use self::server::ServerTlsConfig;
 #[cfg(feature = "tls")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tls")))]
 pub use self::tls::Identity;
+use crate::body::BoxBody;
 
 type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+pub(crate) type Response<B = BoxBody> = http::Response<B>;
+pub(crate) type Request<B = BoxBody> = http::Request<B>;

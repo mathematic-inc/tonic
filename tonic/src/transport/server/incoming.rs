@@ -1,20 +1,18 @@
 use super::{Connected, Server};
 use crate::transport::service::ServerIo;
-use hyper::server::{
-    accept::Accept,
-    conn::{AddrIncoming, AddrStream},
-};
 use std::{
-    net::SocketAddr,
+    net::{SocketAddr, TcpListener as StdTcpListener},
     pin::{pin, Pin},
-    task::{Context, Poll},
+    task::{ready, Context, Poll},
     time::Duration,
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
-    net::TcpListener,
+    net::{TcpListener, TcpStream},
 };
+use tokio_stream::wrappers::TcpListenerStream;
 use tokio_stream::{Stream, StreamExt};
+use tracing::warn;
 
 #[cfg(not(feature = "tls"))]
 pub(crate) fn tcp_incoming<IO, IE, L>(
@@ -127,7 +125,9 @@ enum SelectOutput<A> {
 /// of `AsyncRead + AsyncWrite` that communicate with clients that connect to a socket address.
 #[derive(Debug)]
 pub struct TcpIncoming {
-    inner: AddrIncoming,
+    inner: TcpListenerStream,
+    tcp_keepalive_timeout: Option<Duration>,
+    tcp_nodelay: bool,
 }
 
 impl TcpIncoming {
@@ -139,13 +139,13 @@ impl TcpIncoming {
     /// ```no_run
     /// # use tower_service::Service;
     /// # use http::{request::Request, response::Response};
-    /// # use tonic::{body::BoxBody, server::NamedService, transport::{Body, Server, server::TcpIncoming}};
+    /// # use tonic::{body::BoxBody, server::NamedService, transport::{Server, server::TcpIncoming}};
     /// # use core::convert::Infallible;
     /// # use std::error::Error;
     /// # fn main() { }  // Cannot have type parameters, hence instead define:
     /// # fn run<S>(some_service: S) -> Result<(), Box<dyn Error + Send + Sync>>
     /// # where
-    /// #   S: Service<Request<Body>, Response = Response<BoxBody>, Error = Infallible> + NamedService + Clone + Send + 'static,
+    /// #   S: Service<Request<BoxBody>, Response = Response<BoxBody>, Error = Infallible> + NamedService + Clone + Send + 'static,
     /// #   S::Future: Send + 'static,
     /// # {
     /// // Find a free port
@@ -164,33 +164,67 @@ impl TcpIncoming {
     /// # }
     pub fn new(
         addr: SocketAddr,
-        nodelay: bool,
-        keepalive: Option<Duration>,
+        tcp_nodelay: bool,
+        tcp_keepalive_timeout: Option<Duration>,
     ) -> Result<Self, crate::Error> {
-        let mut inner = AddrIncoming::bind(&addr)?;
-        inner.set_nodelay(nodelay);
-        inner.set_keepalive(keepalive);
-        Ok(TcpIncoming { inner })
+        let std_listener = StdTcpListener::bind(addr)?;
+        std_listener.set_nonblocking(true)?;
+        //TODO: set SO_NODELAY and SO_KEEPALIVE, reqiures socket2 crate
+        let inner = TcpListenerStream::new(TcpListener::from_std(std_listener)?);
+        Ok(Self {
+            inner,
+            tcp_nodelay,
+            tcp_keepalive_timeout,
+        })
     }
 
     /// Creates a new `TcpIncoming` from an existing `tokio::net::TcpListener`.
     pub fn from_listener(
         listener: TcpListener,
-        nodelay: bool,
-        keepalive: Option<Duration>,
+        tcp_nodelay: bool,
+        tcp_keepalive_timeout: Option<Duration>,
     ) -> Result<Self, crate::Error> {
-        let mut inner = AddrIncoming::from_listener(listener)?;
-        inner.set_nodelay(nodelay);
-        inner.set_keepalive(keepalive);
-        Ok(TcpIncoming { inner })
+        Ok(Self {
+            inner: TcpListenerStream::new(listener),
+            tcp_nodelay,
+            tcp_keepalive_timeout,
+        })
     }
 }
 
 impl Stream for TcpIncoming {
-    type Item = Result<AddrStream, std::io::Error>;
+    type Item = Result<TcpStream, std::io::Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.inner).poll_accept(cx)
+        match ready!(Pin::new(&mut self.inner).poll_next(cx)) {
+            Some(Ok(stream)) => {
+                set_accept_socketoptions(&stream, self.tcp_nodelay, self.tcp_keepalive_timeout);
+                Some(Ok(stream)).into()
+            }
+            other => Poll::Ready(other),
+        }
+    }
+}
+
+// Consistent with hyper-0.14, this function does not return an error.
+fn set_accept_socketoptions(
+    stream: &TcpStream,
+    tcp_nodelay: bool,
+    tcp_keepalive_timeout: Option<Duration>,
+) {
+    if tcp_nodelay {
+        if let Err(e) = stream.set_nodelay(true) {
+            warn!("error trying to set TCP nodelay: {}", e);
+        }
+    }
+
+    if let Some(timeout) = tcp_keepalive_timeout {
+        let sock_ref = socket2::SockRef::from(&stream);
+        let sock_keepalive = socket2::TcpKeepalive::new().with_time(timeout);
+
+        if let Err(e) = sock_ref.set_tcp_keepalive(&sock_keepalive) {
+            warn!("error trying to set TCP keepalive: {}", e);
+        }
     }
 }
 

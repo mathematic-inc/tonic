@@ -311,6 +311,7 @@ impl<T> Request<T> {
     /// ```no_run
     /// use tonic::{Request, service::interceptor};
     ///
+    /// #[derive(Clone)] // Extensions must be Clone
     /// struct MyExtension {
     ///     some_piece_of_data: String,
     /// }
@@ -438,7 +439,6 @@ pub(crate) enum SanitizeHeaders {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metadata::MetadataValue;
     use http::Uri;
 
     #[test]

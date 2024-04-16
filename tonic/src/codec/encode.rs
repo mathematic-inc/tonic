@@ -4,8 +4,7 @@ use super::compression::{
 use super::{BufferSettings, EncodeBuf, Encoder, DEFAULT_MAX_SEND_MESSAGE_SIZE, HEADER_SIZE};
 use crate::{Code, Status};
 use bytes::{BufMut, Bytes, BytesMut};
-use http::HeaderMap;
-use http_body::Body;
+use http_body::{Body, Frame};
 use pin_project::pin_project;
 use std::{
     pin::Pin,
@@ -297,28 +296,6 @@ where
     }
 }
 
-impl EncodeState {
-    fn trailers(&mut self) -> Result<Option<HeaderMap>, Status> {
-        match self.role {
-            Role::Client => Ok(None),
-            Role::Server => {
-                if self.is_end_stream {
-                    return Ok(None);
-                }
-
-                let status = if let Some(status) = self.error.take() {
-                    self.is_end_stream = true;
-                    status
-                } else {
-                    Status::new(Code::Ok, "")
-                };
-
-                Ok(Some(status.to_header_map()?))
-            }
-        }
-    }
-}
-
 impl<S> Body for EncodeBody<S>
 where
     S: Stream<Item = Result<Bytes, Status>>,
@@ -326,32 +303,40 @@ where
     type Data = Bytes;
     type Error = Status;
 
-    fn is_end_stream(&self) -> bool {
-        self.state.is_end_stream
-    }
-
-    fn poll_data(
+    fn poll_frame(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Self::Data, Self::Error>>> {
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         let self_proj = self.project();
         match ready!(self_proj.inner.poll_next(cx)) {
-            Some(Ok(d)) => Some(Ok(d)).into(),
+            Some(Ok(d)) => Some(Ok(Frame::data(d))).into(),
             Some(Err(status)) => match self_proj.state.role {
                 Role::Client => Some(Err(status)).into(),
                 Role::Server => {
-                    self_proj.state.error = Some(status);
-                    None.into()
+                    self_proj.state.is_end_stream = true;
+                    Some(Ok(Frame::trailers(status.to_header_map()?))).into()
                 }
             },
-            None => None.into(),
+            None => match self_proj.state.role {
+                Role::Client => None.into(),
+                Role::Server => {
+                    if self_proj.state.is_end_stream {
+                        None.into()
+                    } else {
+                        self_proj.state.is_end_stream = true;
+                        let status = if let Some(status) = self_proj.state.error.take() {
+                            status
+                        } else {
+                            Status::new(Code::Ok, "")
+                        };
+                        Some(Ok(Frame::trailers(status.to_header_map()?))).into()
+                    }
+                }
+            },
         }
     }
 
-    fn poll_trailers(
-        self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-    ) -> Poll<Result<Option<HeaderMap>, Status>> {
-        Poll::Ready(self.project().state.trailers())
+    fn is_end_stream(&self) -> bool {
+        self.state.is_end_stream
     }
 }
